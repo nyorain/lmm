@@ -26,13 +26,6 @@ namespace vil {
 // Memory consumption is currently always O(n^2) since this was never
 // a big problem. It could be reduced, being ~O(n) for the well-matching
 // cases as well.
-//
-// This was originally developed for vil (https://github.com/nyorain/vil),
-// where we need this for command hierachy matching, associating
-// commands between different frames and submissions.
-// Due to the hierachical nature of our matching (and the way applications
-// usually submit very similar workloads in each frame), we are interested
-// in making the case of similar sequences fast.
 struct LazyMatrixMarch {
 	// Describes a match between the ith sequence item in the first sequence
 	// with the jth sequence item in the second sequence, with a match
