@@ -5,7 +5,7 @@
 #include <span>
 
 #define dlg_assert(x) assert((x))
-#define dlg_assertm(x, t) assert((x) && t)
+#define dlg_assertm(x, t, ...) assert((x) && t)
 
 #ifdef NDEBUG
 	#define VIL_DEBUG_ONLY(x)

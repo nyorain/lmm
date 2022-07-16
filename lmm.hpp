@@ -94,7 +94,7 @@ private:
 	};
 
 	void addCandidate(float score, u32 i, u32 j, u32 addI, u32 addJ);
-	EvalMatch& match(u32 i, u32 j) { return matchMatrix_[height() * i + j]; }
+	EvalMatch& match(u32 i, u32 j) { return matchMatrix_[width() * i + j]; }
 
 	void insertCandidate(u32 i, u32 j, float score);
 	Candidate popCandidate();
