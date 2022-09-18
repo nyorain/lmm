@@ -57,6 +57,19 @@ inline std::size_t memOffset(const LinMemBlock& block) {
 	return block.data - dataBegin(block);
 }
 
+template<typename T>
+class UniqueSpan : public span<T> {
+public:
+	using span<T>::span;
+	UniqueSpan(const UniqueSpan& rhs) = delete;
+	UniqueSpan& operator=(const UniqueSpan& rhs) = delete;
+	UniqueSpan(UniqueSpan&& rhs) noexcept = default;
+	UniqueSpan& operator=(UniqueSpan&& rhs) noexcept = default;
+	~UniqueSpan() {
+		std::destroy_n(this->data(), this->size());
+	}
+};
+
 struct LinAllocator {
 	// We grow block sizes exponentially, up to a maximum
 	// NOTE: temporarily increased minBlockSize as it has a huge performance
@@ -159,6 +172,12 @@ struct LinAllocator {
 		return {ptr, n};
 	}
 
+	template<typename T>
+	UniqueSpan<T> allocNonTrivial(size_t n) {
+		auto ptr = allocRaw<T, true>(n);
+		return {ptr, n};
+	}
+
 	// Like alloc but does not value-initialize, so may be faster but
 	// leaves primitives with undefined values.
 	template<typename T>
@@ -174,10 +193,16 @@ struct LinAllocator {
 		return ret;
 	}
 
+	template<typename T>
+	span<std::remove_const_t<T>> copy(span<T> src) {
+		return copy(src.data(), src.size());
+	}
+
 	// NOTE: prefer alloc, returning a span.
 	// This function be useful for single allocations though.
-	template<typename T>
+	template<typename T, bool allowNonTrivial = false>
 	T* allocRaw(size_t n = 1) {
+		static_assert(allowNonTrivial || std::is_trivially_destructible_v<T>);
 		auto ptr = reinterpret_cast<T*>(allocate(sizeof(T) * n, alignof(T)));
 		new(ptr) T[n]();
 		return ptr;
@@ -185,8 +210,9 @@ struct LinAllocator {
 
 	// Like allocRaw but does not value-initialize, so may be faster but
 	// leaves primitives with undefined values.
-	template<typename T>
+	template<typename T, bool allowNonTrivial = false>
 	T* allocRawUndef(size_t n = 1) {
+		static_assert(allowNonTrivial || std::is_trivially_destructible_v<T>);
 		auto ptr = reinterpret_cast<T*>(allocate(sizeof(T) * n, alignof(T)));
 		new(ptr) T[n];
 		return ptr;
@@ -226,7 +252,8 @@ struct LinAllocScope {
 
 	template<typename T, typename... Args>
 	[[nodiscard]] T& construct(Args&&... args) {
-		auto* raw = tc.allocate(sizeof(T), alignof(T));
+		static_assert(std::is_trivially_destructible_v<T>);
+		auto* raw = allocBytes(sizeof(T), alignof(T));
 		return *new(raw) T(std::forward<Args>(args)...);
 	}
 
@@ -246,6 +273,10 @@ struct LinAllocScope {
 
 	template<typename T>
 	span<std::remove_const_t<T>> copy(T* data, size_t n) {
+		if(n == 0u) {
+			return {};
+		}
+
 		auto ret = this->allocUndef<std::remove_const_t<T>>(n);
 		std::memcpy(ret.data(), data, n * sizeof(T));
 		return ret;
@@ -255,6 +286,7 @@ struct LinAllocScope {
 	// This function be useful for single allocations though.
 	template<typename T>
 	T* allocRaw(size_t n = 1) {
+		static_assert(std::is_trivially_destructible_v<T>);
 		auto ptr = reinterpret_cast<T*>(allocBytes(sizeof(T) * n, alignof(T)));
 		new(ptr) T[n]();
 		return ptr;
@@ -264,9 +296,15 @@ struct LinAllocScope {
 	// leaves primitives with undefined values.
 	template<typename T>
 	T* allocRawUndef(size_t n = 1) {
+		static_assert(std::is_trivially_destructible_v<T>);
 		auto ptr = reinterpret_cast<T*>(allocBytes(sizeof(T) * n, alignof(T)));
 		new(ptr) T[n];
 		return ptr;
+	}
+
+	template<typename T>
+	span<std::remove_const_t<T>> copy(span<T> src) {
+		return copy(src.data(), src.size());
 	}
 
 	inline std::byte* allocBytes(std::size_t size, std::size_t alignment) {
@@ -396,5 +434,4 @@ inline std::string_view copy(LinAllocator& alloc, std::string_view src) {
 }
 
 } // namespace vil
-
 

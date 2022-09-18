@@ -1,5 +1,4 @@
-#include "lmm.hpp"
-#include "list.hpp"
+#include <lmm.hpp>
 
 namespace vil {
 
@@ -11,24 +10,32 @@ float maxPossibleScore(float score, u32 width, u32 height, u32 i, u32 j) {
 LazyMatrixMarch::LazyMatrixMarch(u32 width, u32 height, LinAllocator& alloc,
 	Matcher matcher, float branchThreshold) :
 		alloc_(alloc), width_(width), height_(height), matcher_(std::move(matcher)),
-		branchThreshold_(branchThreshold) {
+		branchThreshold_(branchThreshold), candidates_(HeapCandCompare{*this}, alloc) {
+
 	dlg_assert(width > 0);
 	dlg_assert(height > 0);
+	// if we ever exceed this, just use 32-bit integers for HeapCand.
+	// Not that big of a loss, 16-bit was done because of performance
+	// and memory concerns. Who matches such HUGE sequences?!
+	dlg_assert(width < 1024 * 64);
+	dlg_assert(height < 1024 * 64);
 	dlg_assert(matcher_);
 
-	matchMatrix_ = alloc.alloc<EvalMatch>(width * height);
+	matchMatrix_ = alloc.allocNonTrivial<EvalMatch>(width * height);
 
-	// init queue and freeList
-	queue_.next = &queue_;
-	queue_.prev = &queue_;
-	freeList_.next = &freeList_;
-	freeList_.prev = &freeList_;
+	for(auto& m : matchMatrix_) {
+		m.candidate = candidates_.end();
+	}
 
-	// add initial candidate
-	insertCandidate(0, 0, 0.f);
+	// insert first candidate
+	auto it = candidates_.insert({0, 0, 0.f}).first;
+	match(0, 0).best = 0.f;
+	match(0, 0).candidate = it;
 }
 
 void LazyMatrixMarch::addCandidate(float score, u32 i, u32 j, u32 addI, u32 addJ) {
+	ExtZoneScoped;
+
 	if(i + addI >= width() || j + addJ >= height()) {
 		// we have a finished run.
 		if(score > bestMatch_) {
@@ -43,29 +50,44 @@ void LazyMatrixMarch::addCandidate(float score, u32 i, u32 j, u32 addI, u32 addJ
 
 	auto maxPossible = maxPossibleScore(score, i + addI, j + addJ);
 	if(maxPossible > bestMatch_) {
-		insertCandidate(i + addI, j + addJ, score);
+		// NOTE: retrieving this here kinda costly and redundant to the
+		// check in step(). But it's an early out that cuts down
+		// the number of steps/candidates a lot so probably worth doing
+		// (we otherwise early-out in step() often).
+		auto& m = match(i + addI, j + addJ);
+		if(m.best < score) {
+			if(m.candidate != candidates_.end()) {
+				candidates_.erase(m.candidate);
+			}
+
+			auto [it, succ] = candidates_.insert({u16(i + addI), u16(j + addJ), score});
+			dlg_assert(succ);
+			m.candidate = it;
+			m.best = score;
+		}
 	}
 }
 
 bool LazyMatrixMarch::step() {
+	ExtZoneScoped;
+
 	if(empty()) {
 		return false;
 	}
 
 	++numSteps_;
-	const auto cand = popCandidate();
+	auto cand = popCandidate();
 
 	// should be true due to pruning
-	// (i guess can be false when our metric does not fulfill the
-	// assumption used in prune(newScore) about the ordering)
-	dlg_assert(maxPossibleScore(cand.score, cand.i, cand.j) >= bestMatch_);
+	dlg_assert(maxPossibleScore(cand) >= bestMatch_);
 
 	auto& m = this->match(cand.i, cand.j);
-	if(m.best >= cand.score) {
-		return true;
-	}
+	m.candidate = candidates_.end();
 
-	m.best = cand.score;
+	// this invariant follows from the way we insert new candidates
+	// there is always at most one candidate per field
+	dlg_assert(m.best == cand.score);
+
 	if(m.eval == -1.f) {
 		m.eval = matcher_(cand.i, cand.j);
 		++numEvals_;
@@ -79,12 +101,12 @@ bool LazyMatrixMarch::step() {
 		prune(newScore);
 	}
 
-	// TODO: yeah with fuzzy matching we should always branch
+	// NOTE: yeah with fuzzy matching we should always branch
 	// out... This will generate so many candidates tho :(
 	// otoh they have a lower score so won't be considered.
 	// And for perfect matches we still only generate 3 * n
 	// candidates total.
-	// TODO: only threshold = 1.f is guaranteed to be 100% correct,
+	// NOTE: only threshold = 1.f is guaranteed to be 100% correct,
 	// otherwise it's a heuristic.
 	if(m.eval < branchThreshold_) {
 		addCandidate(cand.score, cand.i, cand.j, 1, 0);
@@ -95,6 +117,8 @@ bool LazyMatrixMarch::step() {
 }
 
 LazyMatrixMarch::Result LazyMatrixMarch::run() {
+	ExtZoneScoped;
+
 	// run algorithm
 	while(step()) /*noop*/;
 
@@ -118,15 +142,15 @@ LazyMatrixMarch::Result LazyMatrixMarch::run() {
 
 	while(i > 0 && j > 0) {
 		auto& score = match(i, j);
-		auto& up = match(i - 1, j);
+		auto& up = match(i, j - 1);
 		if(up.best == score.best) {
-			--i;
+			--j;
 			continue;
 		}
 
-		auto& left = match(i, j - 1);
+		auto& left = match(i - 1, j);
 		if(left.best == score.best) {
-			--j;
+			--i;
 			continue;
 		}
 
@@ -153,107 +177,44 @@ float LazyMatrixMarch::maxPossibleScore(float score, u32 i, u32 j) const {
 	return vil::maxPossibleScore(score, width_, height_, i, j);
 }
 
-void LazyMatrixMarch::insertCandidate(u32 i, u32 j, float score) {
-	Candidate* cand;
-	if(freeList_.next != &freeList_) {
-		cand = freeList_.next;
-		unlink(*cand);
-	} else {
-		cand = &alloc_.construct<Candidate>();
-	}
+LazyMatrixMarch::HeapCand LazyMatrixMarch::popCandidate() {
+	dlg_assert(!empty());
 
-	cand->i = i;
-	cand->j = j;
-	cand->score = score;
-
-	auto it = queue_.next;
-	while(it != &queue_ && metric(*it) > metric(*cand)) {
-		it = it->next;
-	}
-
-	insertBefore(*it, *cand);
+	auto it = candidates_.end();
+	--it;
+	auto cand = *it;
+	candidates_.erase(it); // pop_back, basically
+	return cand;
 }
 
-LazyMatrixMarch::Candidate LazyMatrixMarch::popCandidate() {
-	dlg_assert(!empty());
-	auto ret = *queue_.next;
-
-	auto& newFree = *queue_.next;
-	unlink(newFree);
-	insertAfter(freeList_, newFree);
-
-	return ret;
-}
-
-LazyMatrixMarch::Candidate LazyMatrixMarch::peekCandidate() const {
-	dlg_assert(!empty());
-	return *queue_.next;
+LazyMatrixMarch::HeapCand LazyMatrixMarch::peekCandidate() const {
+	auto it = candidates_.end();
+	--it;
+	return *it;
 }
 
 void LazyMatrixMarch::prune(float minScore) {
-	// PERF: can be implement more efficiently, unlinking and
-	// inserting the whole sub-linked-list
-	// TODO: assumed we have maxPossibleScore as metric, not working
-	// perfectly with other (e.g. score-based)
+	ExtZoneScoped;
 
-#define SLOW_BUT_CORRECT_IMPL
-#ifndef SLOW_BUT_CORRECT_IMPL
-	auto it = queue_.prev;
-	while(it != &queue_ && maxPossibleScore(it->score, it->i, it->j) < minScore) {
-		auto prev = it->prev;
+	// for this to work correctly, it's important that maxPossibleScore
+	// is always the primary criterion in the heap comparison function
 
-		auto& newFree = *it;
-		unlink(newFree);
-		insertAfter(freeList_, newFree);
-
-		it = prev;
-	}
-
-	// alternative (but SLOW) implementation without metric assumption
-#else
-	auto it = queue_.prev;
-	while(it != &queue_ /*&& maxPossibleScore(it->score, it->i, it->j) < minScore*/) {
-		auto prev = it->prev;
-
-		if(maxPossibleScore(it->score, it->i, it->j) < minScore) {
-			auto& newFree = *it;
-			unlink(*it);
-			insertAfter(freeList_, newFree);
-		}
-
-		// minimum ordering assumption
-		if(it->score >= minScore) {
+	auto it = candidates_.begin();
+	for(; it != candidates_.end(); ++it) {
+		if(maxPossibleScore(*it) >= minScore) {
 			break;
 		}
 
-		it = prev;
+		auto& m = match(it->i, it->j);
+		dlg_assert(m.candidate != candidates_.end());
+		m.candidate = candidates_.end();
 	}
-#endif // 0
-}
 
-float LazyMatrixMarch::metric(const Candidate& c) const {
-	// The '+ 0.01 * ' parts are basically tie-breakers.
+	if(it != candidates_.begin()) {
+		candidates_.erase(candidates_.begin(), it);
+	}
 
-	// Metric: prefer high score.
-	// This basically means we go depth-first
-	// Pro: we have a path through the matrix very quickly, allowing
-	//   us to prune/not consider some bad cases
-	// Contra: often we will run many complete paths through the matrix,
-	//   looks like candidate bubbles. So a lot of iteration needed
-	//   in the end to be sure we have the best path.
-	// return c.score + 0.01 * maxPossibleScore(c.score, c.i, c.j);
-
-	// Metric: prefer high possible score.
-	// This is more like breadth-first.
-	// Pro: allows efficient pruning (see prune). Also results in a lower
-	//   number of total iterations
-	// Contra: we might evaluate candidates we could have excluded
-	//   otherwise
-	return maxPossibleScore(c.score, c.i, c.j) + 0.01 * c.score;
-
-	// Mixed metric. Should investigate this.
-	// return maxPossibleScore(c.score, c.i, c.j) + c.score;
+	return;
 }
 
 } // namespace vil
-

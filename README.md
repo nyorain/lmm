@@ -21,12 +21,11 @@ a concern so far).
 Files:
 - [lmm.hpp](lmm.hpp), [lmm.cpp](lmm.cpp): Main implementation of the algorithm
 - [linalloc.hpp](linalloc.hpp), [linalloc.cpp](linalloc.cpp): Utility linear
-  block-based allocator, to avoid many tiny allocations in the lmm algorithm
+  block-based allocator, to avoid many tiny allocations in the LMM algorithm
   itself. Feel free to replace it with your own allocator but we have
   some requirements regarding the lifetime (and currently don't
   free anything as it's not needed with the way the linear allocator
   is usually used)
-- [list.hpp](list.hpp): simple template utility for building intrusive doubly linked lists
 - [common.hpp](common.hpp): some compatibility macros so the source could mostly
   be left as is was in [vil](github.com/nyorain/vil)
 - [meson.build](meson.build): Simple build script
@@ -34,8 +33,8 @@ Files:
 ---
 
 This was originally developed for [vil](https://github.com/nyorain/vil),
-where we need this for command hierachy matching, associating
+where we need this for command hierarchy matching, associating
 commands between different frames and submissions.
-Due to the hierachical nature of our matching (and the way applications
+Due to the hierarchical nature of our matching (and the way applications
 usually submit very similar workloads in each frame), we are interested
 in making the case of similar sequences fast.
